@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.2;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -15,8 +15,7 @@ contract GLXRClaim is Ownable {
 
     uint256 public claimWindowEndTime;
     bool public claimWindowClosed;
-    mapping(bytes32 => bool) public claimed;
-    mapping(address => bytes32[]) public merkleProofs;
+    mapping(uint256 => uint256) private claimedBitMap;
 
     constructor(GLXRToken _newToken, GLXRStaker _staker, bytes32 _merkleRoot) {
         newToken = _newToken;
@@ -25,8 +24,25 @@ contract GLXRClaim is Ownable {
         claimWindowEndTime = block.timestamp + claimWindowDuration;
     }
 
+    function isClaimed(uint256 index) public view returns (bool) {
+        uint256 claimedWordIndex = index / 256;
+        uint256 claimedBitIndex = index % 256;
+        uint256 claimedWord = claimedBitMap[claimedWordIndex];
+        uint256 mask = (1 << claimedBitIndex);
+        return claimedWord & mask == mask;
+    }
+
+    function _setClaimed(uint256 index) private {
+        uint256 claimedWordIndex = index / 256;
+        uint256 claimedBitIndex = index % 256;
+        claimedBitMap[claimedWordIndex] =
+            claimedBitMap[claimedWordIndex] |
+            (1 << claimedBitIndex);
+    }
+
     function claimNewToken(
         uint256 stakeDuration,
+        uint256 index,
         uint256 amount,
         bytes32[] calldata _merkleProof
     ) external {
@@ -36,16 +52,15 @@ contract GLXRClaim is Ownable {
             "TokenMigration: Minimum stake duration is 90 days"
         );
 
-        // Verify the Merkle proof.
-        bytes32 node = keccak256(abi.encodePacked(msg.sender, amount));
-        require(claimed[node] == false);
+        require(!isClaimed(index), "index has already been claimed");
+        bytes32 node = keccak256(abi.encodePacked(index, msg.sender, amount));
         require(
-            MerkleProof.verify(_merkleProof, merkleRoot, node),
-            "TokenMigration: Invalid Merkle Proof"
+            !MerkleProof.verify(_merkleProof, merkleRoot, node),
+            "invalid proof"
         );
 
-        claimed[node] = true;
-
+        // Mark it claimed and send the token.
+        _setClaimed(index);
         // Mint new tokens
         newToken.mint(msg.sender, amount);
 
