@@ -11,7 +11,8 @@ contract GLXRClaim is Ownable {
     GLXRToken public newToken;
     GLXRStaker public staker;
     bytes32 public merkleRoot;
-    uint256 public constant claimWindowDuration = 5 days;
+    uint256 public constant claimWindowDuration = 10 days;
+    
 
     uint256 public claimWindowEndTime;
     bool public claimWindowClosed;
