@@ -7,7 +7,7 @@ import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol"
 import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 
-contract GLXRToken is
+contract GALAXER is
     Initializable,
     ERC20Upgradeable,
     OwnableUpgradeable,
@@ -17,6 +17,7 @@ contract GLXRToken is
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant BLACKLISTED_ROLE = keccak256("BLACKLISTED_ROLE");
+    uint256 public constant MAX_SUPPLY = 100 * 10**12 * 10**18; // 100 Trillion tokens with 18 decimals
 
     bool private _paused;
 
@@ -34,8 +35,10 @@ contract GLXRToken is
     }
 
     function mint(address to, uint256 amount) external onlyRole(MINTER_ROLE) {
-        _mint(to, amount);
-    }
+    require(totalSupply() + amount <= MAX_SUPPLY, "ERC20: minting would exceed max supply");
+    _mint(to, amount);
+}
+
 
     function pause() external onlyRole(PAUSER_ROLE) {
         _paused = true;
