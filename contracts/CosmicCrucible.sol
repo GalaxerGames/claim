@@ -5,141 +5,210 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/AccessControlEnumerable.sol";
 import "@openzeppelin/contracts/utils/Context.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Capped.sol";
 
-contract NebulaNote is ERC20, ERC20Burnable, Ownable {
-    constructor() ERC20("Nebula Notes", "NEBULAE") {}
+contract NebulaNote is ERC20Capped, ERC20Burnable, Ownable {
+    address public minter;
 
-    function mint(address to, uint256 amount) external onlyOwner {
+    constructor() ERC20("Nebula Note", "NEBULAE") ERC20Capped(100000000000000 * 10**18) {
+    }
+
+    function setMinter(address _minter) external onlyOwner {
+        minter = _minter;
+    }
+
+    function mintTo(address to, uint256 amount) external {
+        require(msg.sender == minter, "Only minter can mint");
         _mint(to, amount);
     }
 
-    function transfer(address, uint256) public pure override returns (bool) {
-        revert("Transfers are disabled");
-    }
-
-    function transferFrom(address, address, uint256) public pure override returns (bool) {
-        revert("Transfers are disabled");
+    function _mint(address account, uint256 amount) internal virtual override(ERC20, ERC20Capped) {
+        super._mint(account, amount);
     }
 }
 
-contract CosmicCrucible is Context, Ownable, ReentrancyGuard {
+contract CosmicCrucible is Context, Ownable, ReentrancyGuard, Pausable, AccessControlEnumerable {
     using SafeERC20 for IERC20;
+    using SafeMath for uint256;
+
+    bytes32 public constant STAKER_ROLE = keccak256("STAKER_ROLE");
 
     IERC20 private token;
-    NebulaNote private NebulaNoteInstance;
+    NebulaNote private nebulaNoteInstance;
     address private penaltyAddress;
 
     mapping(address => uint256) public stakedAmount;
     mapping(address => uint256) public stakedDuration;
     mapping(address => uint256) public stakedTimestamp;
-    uint256 public totalStakedAmount;
+    mapping(address => uint256) public stakedAmountOfNebulae;
+    mapping(address => bool) public isStakeholder;
 
-    // The staker address
-    address public staker;
+    uint256 public totalStakedAmount;
 
     event TokensStaked(address indexed user, uint256 amount, uint256 duration);
     event TokensUnstaked(address indexed user, uint256 amount);
+    event EmergencyWithdraw(address indexed user, uint256 amount);
 
-    constructor(IERC20 _token) {
-        token = _token;
-        NebulaNoteInstance = new NebulaNote();
+constructor(IERC20 _token, address _adminAddress, address _penaltyAddress) {
+    require(_adminAddress != address(0), "Admin address must be a valid address");
+    _setupRole(DEFAULT_ADMIN_ROLE, _adminAddress);
+    _setRoleAdmin(STAKER_ROLE, DEFAULT_ADMIN_ROLE);
 
-        // Initialize staker as the contract deployer
-        staker = _msgSender();
-    }
+    require(_penaltyAddress != address(0), "Penalty address must be a valid address");
 
-    modifier onlyStaker() {
-        require(_msgSender() == staker, "Only staker can call this function.");
-        _;
-    }
-
-    function changeStaker(address newStaker) external onlyOwner {
-        require(newStaker != address(0), "New staker must be a valid address");
-        staker = newStaker;
-    }
-
-function stakeTokensFor(
-    address beneficiary,
-    uint256 _amount,
-    uint256 _duration
-) external nonReentrant onlyStaker {
-    require(beneficiary != address(0), "Beneficiary must be valid address");
-    require(_amount > 0, "Amount must be greater than zero");
-    require(
-        _duration == 90 days ||
-            _duration == 180 days ||
-            _duration == 270 days ||
-            _duration == 365 days,
-        "Invalid duration"
-    );
-
-    stakedAmount[beneficiary] += _amount;
-    stakedDuration[beneficiary] = _duration;
-    stakedTimestamp[beneficiary] = block.timestamp;
-    totalStakedAmount += _amount;
-
-    NebulaNoteInstance.mint(beneficiary, _amount);
-
-    emit TokensStaked(beneficiary, _amount, _duration);
+    token = _token;
+    nebulaNoteInstance = new NebulaNote();
+    nebulaNoteInstance.setMinter(address(this));
+    penaltyAddress = _penaltyAddress;
 }
 
 
-function stakeTokens(uint256 _amount, uint256 _duration) external nonReentrant {
-    require(_amount > 0, "Amount must be greater than zero");
-    require(
-        _duration == 90 days ||
-        _duration == 180 days ||
-        _duration == 270 days ||
-        _duration == 365 days,
-        "Invalid duration"
-    );
-    uint256 mult = getMultiplier(_duration);  // Removed 'staker.' prefix
-    _amount = _amount * mult;
-    token.safeTransferFrom(_msgSender(), address(this), _amount);
+    modifier onlyStaker() {
+        require(hasRole(STAKER_ROLE, _msgSender()), "Caller is not a staker");
+        _;
+    }
 
+    modifier validDuration(uint256 _duration) {
+        require(
+            _duration == 1 minutes ||
+            _duration == 90 days ||
+            _duration == 180 days ||
+            _duration == 270 days ||
+            _duration == 365 days,
+            "Invalid duration"
+        );
+        _;
+    }
+
+    function changeAdmin(address newAdmin) public onlyOwner {
+    grantRole(DEFAULT_ADMIN_ROLE, newAdmin);
+    revokeRole(DEFAULT_ADMIN_ROLE, _msgSender());
+}
+
+    function addStaker(address newStaker) public onlyOwner {
+        grantRole(STAKER_ROLE, newStaker);
+    }
+
+    function removeStaker(address staker) public onlyOwner {
+        revokeRole(STAKER_ROLE, staker);
+    }
+
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
+    function emergencyWithdraw() external onlyOwner whenPaused {
+        require(totalStakedAmount > 0, "Nothing to withdraw");
+        token.safeTransfer(_msgSender(), totalStakedAmount);
+        totalStakedAmount = 0;
+
+        emit EmergencyWithdraw(_msgSender(), totalStakedAmount);
+    }
+
+    // Add the new function here
+    function changeMinter(address _newMinter) external onlyOwner {
+        nebulaNoteInstance.setMinter(_newMinter);
+    }
+
+    // And the withdrawNebulaNotes function
+    function withdrawNebulaNotes(address to, uint256 amount) external onlyOwner {
+        uint256 nebulaBalance = nebulaNoteInstance.balanceOf(address(this));
+        require(nebulaBalance >= amount, "Not enough Nebula Notes in contract");
+        nebulaNoteInstance.transfer(to, amount);
+    }
+function stakeTokensFor(
+    address forWhom,
+    uint256 amount,
+    uint256 duration
+) external onlyStaker validDuration(duration) whenNotPaused nonReentrant {
+    // If the user is not already a stakeholder or their previous stake has ended, allow them to stake again
+    if (!isStakeholder[forWhom] || block.timestamp >= stakedTimestamp[forWhom].add(stakedDuration[forWhom])) {
+        isStakeholder[forWhom] = true;
+        stakedDuration[forWhom] = duration;
+        stakedTimestamp[forWhom] = block.timestamp;
+    }
+
+    // Add the new stake amount
+    stakedAmount[forWhom] = stakedAmount[forWhom].add(amount);
+    totalStakedAmount = totalStakedAmount.add(amount);
+
+    uint256 nebulaeAmount = amount.mul(getMultiplier(duration));
+    stakedAmountOfNebulae[forWhom] = stakedAmountOfNebulae[forWhom].add(nebulaeAmount);
+
+    token.safeTransferFrom(_msgSender(), address(this), amount);
+    nebulaNoteInstance.mintTo(forWhom, nebulaeAmount);
+
+    emit TokensStaked(forWhom, amount, duration);
+}
+
+
+function stakeTokens(uint256 _amount, uint256 _duration) external validDuration(_duration) whenNotPaused nonReentrant {
+    require(_amount > 0, "Amount must be greater than zero");
+
+    uint256 mult = getMultiplier(_duration);
+    _amount = _amount * mult;
+
+    // If the user is not already a stakeholder or their previous stake has ended, allow them to stake again
+    if (!isStakeholder[_msgSender()] || block.timestamp >= stakedTimestamp[_msgSender()].add(stakedDuration[_msgSender()])) {
+        isStakeholder[_msgSender()] = true;
+        stakedDuration[_msgSender()] = _duration;
+        stakedTimestamp[_msgSender()] = block.timestamp;
+    }
+
+    // Add the new stake amount
     stakedAmount[_msgSender()] += _amount;
-    stakedDuration[_msgSender()] = _duration;
-    stakedTimestamp[_msgSender()] = block.timestamp;
     totalStakedAmount += _amount;
 
-    NebulaNoteInstance.mint(_msgSender(), _amount);
+    // Mint Nebula Note tokens to the sender
+    uint256 nebulaeAmount = _amount;
+    stakedAmountOfNebulae[_msgSender()] = stakedAmountOfNebulae[_msgSender()].add(nebulaeAmount);
+
+    token.safeTransferFrom(_msgSender(), address(this), _amount);
+    nebulaNoteInstance.mintTo(_msgSender(), nebulaeAmount);
 
     emit TokensStaked(_msgSender(), _amount, _duration);
 }
 
 
- function unstakeTokens() external nonReentrant {
-    uint256 stakedAmount_ = stakedAmount[_msgSender()];
-    require(stakedAmount_ > 0, "No tokens staked");
-
-    uint256 stakedDuration_ = stakedDuration[_msgSender()];
+function unstakeTokens() external whenNotPaused nonReentrant {
+    require(isStakeholder[_msgSender()] == true, "You do not have any staked tokens");
     uint256 timeElapsed = block.timestamp - stakedTimestamp[_msgSender()];
-    require(timeElapsed >= stakedDuration_, "Stake duration not reached");
+    uint256 amount = stakedAmount[_msgSender()];
+    uint256 penaltyAmount = 0;
 
-    // Burn all Nebula Notes associated with the user
-    uint256 nebulaNotesToBurn = NebulaNoteInstance.balanceOf(_msgSender());
-    NebulaNoteInstance.burnFrom(_msgSender(), nebulaNotesToBurn);
+    // If the time elapsed is less than the staking duration, calculate penalty
+    if (timeElapsed < stakedDuration[_msgSender()]) {
+        penaltyAmount = calculatePenaltyAmount(
+            amount,
+            stakedDuration[_msgSender()],
+            timeElapsed
+        );
+    }
+    uint256 unstakeAmount = amount - penaltyAmount;
+    stakedAmount[_msgSender()] = 0;
+    totalStakedAmount = totalStakedAmount.sub(amount);
+    isStakeholder[_msgSender()] = false;
 
-    uint256 penaltyAmount = calculatePenaltyAmount(
-        stakedAmount_,
-        stakedDuration_,
-        timeElapsed
-    );
-    uint256 unstakedAmount = stakedAmount_ - penaltyAmount;
+    nebulaNoteInstance.burn(stakedAmountOfNebulae[_msgSender()]);
+    stakedAmountOfNebulae[_msgSender()] = 0;
 
-    delete stakedAmount[_msgSender()];
-    delete stakedDuration[_msgSender()];
-    delete stakedTimestamp[_msgSender()];
-    totalStakedAmount -= stakedAmount_;
-
-    token.safeTransfer(_msgSender(), unstakedAmount);
+    // Transfer the penalty amount to the penaltyAddress
     if (penaltyAmount > 0) {
         token.safeTransfer(penaltyAddress, penaltyAmount);
     }
+    // Unstake the tokens after applying penalty
+    token.safeTransfer(_msgSender(), unstakeAmount);
 
-    emit TokensUnstaked(_msgSender(), unstakedAmount);
+    emit TokensUnstaked(_msgSender(), unstakeAmount);
 }
 
     function calculatePenaltyAmount(
@@ -188,19 +257,21 @@ function stakeTokens(uint256 _amount, uint256 _duration) external nonReentrant {
         return 0;
     }
 
-function getMultiplier(uint256 duration) public pure returns (uint256) {
-    if (duration == 90 days) {
-        return 10;
-    } else if (duration == 180 days) {
-        return 100;
-    } else if (duration == 270 days) {
-        return 1000;
-    } else if (duration == 365 days) {
-        return 2000;
-    } else {
-        revert("Invalid staking duration");
+    function getMultiplier(uint256 duration) public pure returns (uint256) {
+        if (duration == 90 days) {
+            return 10;
+        } else if (duration == 1 minutes) {
+            return 2;
+        } else if (duration == 180 days) {
+            return 100;
+        }  else if (duration == 270 days) {
+            return 1000;
+        } else if (duration == 365 days) {
+            return 2000;
+        } else {
+            revert("Invalid staking duration");
+        }
     }
-}
 
     function setPenaltyAddress(address _penaltyAddress) external onlyOwner {
         penaltyAddress = _penaltyAddress;

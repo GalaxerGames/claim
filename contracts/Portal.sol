@@ -26,8 +26,8 @@ function claimNewToken(
 ) external {
     require(!claimWindowClosed, "TokenMigration: Claim window closed");
     require(
-        stakeDuration >= 90 days,
-        "TokenMigration: Minimum stake duration is 90 days"
+        stakeDuration >= 1 minutes,
+        "TokenMigration: Minimum stake duration is 1 minute"
     );
     require(
         !hasClaimed[msg.sender],
