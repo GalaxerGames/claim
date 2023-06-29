@@ -57,7 +57,6 @@ function claimNewToken(
 }
 
 
-
     function mintRemainingTokens() internal {
         require(
             !claimWindowClosed,
