@@ -14,14 +14,20 @@ import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Capped.sol";
 
 contract NebulaNote is ERC20Capped, ERC20Burnable, Ownable {
     address public minter;
+    CosmicCrucible public cosmicCrucibleInstance;
 
     constructor() ERC20("Nebula Note", "NEBULAE") ERC20Capped(100000000000000 * 10**18) {
     }
 
     function setMinter(address _minter) external onlyOwner {
-        minter = _minter;
+    require(minter == address(0), "Minter already set");
+    minter = _minter;
     }
 
+    function setCosmicCrucibleInstance(CosmicCrucible _cosmicCrucibleInstance) external onlyOwner {
+    require(address(cosmicCrucibleInstance) == address(0), "CosmicCrucibleInstance already set");
+    cosmicCrucibleInstance = _cosmicCrucibleInstance;
+    }
     function mintTo(address to, uint256 amount) external {
         require(msg.sender == minter, "Only minter can mint");
         _mint(to, amount);
@@ -30,7 +36,17 @@ contract NebulaNote is ERC20Capped, ERC20Burnable, Ownable {
     function _mint(address account, uint256 amount) internal virtual override(ERC20, ERC20Capped) {
         super._mint(account, amount);
     }
+
+    function _beforeTokenTransfer(address from, address to, uint256 amount) internal override {
+        super._beforeTokenTransfer(from, to, amount);
+
+        if (from != address(0)) {
+            // Transfer staking rights
+            cosmicCrucibleInstance.transferStakingRights(from, to, amount);
+        }
+    }
 }
+
 
 contract CosmicCrucible is Context, Ownable, ReentrancyGuard, Pausable, AccessControlEnumerable {
     using SafeERC20 for IERC20;
@@ -41,12 +57,20 @@ contract CosmicCrucible is Context, Ownable, ReentrancyGuard, Pausable, AccessCo
     IERC20 private token;
     NebulaNote private nebulaNoteInstance;
     address private penaltyAddress;
+    uint256 public currentMintId = 0;
+
 
     mapping(address => uint256) public stakedAmount;
     mapping(address => uint256) public stakedDuration;
     mapping(address => uint256) public stakedTimestamp;
     mapping(address => uint256) public stakedAmountOfNebulae;
     mapping(address => bool) public isStakeholder;
+    // Map a staked amount of GLXR to a specific Nebula Note
+    mapping(uint256 => uint256) public nebulaNoteToGLXR;
+    // Mapping from minting ID to the equivalent staked GLXR amount
+    mapping(uint256 => uint256) public mintIdToGLXR;
+    // Mapping from user to the last minting ID
+    mapping(address => uint256) public lastMintId;
 
      // The staker address
     address public staker;
@@ -68,6 +92,7 @@ constructor(IERC20 _token, address _adminAddress, address _penaltyAddress) {
 
     token = _token;
     nebulaNoteInstance = new NebulaNote();
+    nebulaNoteInstance.setCosmicCrucibleInstance(this);
     nebulaNoteInstance.setMinter(address(this));
     penaltyAddress = _penaltyAddress;
 }
@@ -125,8 +150,9 @@ constructor(IERC20 _token, address _adminAddress, address _penaltyAddress) {
         emit EmergencyWithdraw(_msgSender(), totalStakedAmount);
     }
 
-    // Add the new function here
+    // Change minter address for NN
     function changeMinter(address _newMinter) external onlyOwner {
+        require(_newMinter != address(0), "New minter address is not valid");
         nebulaNoteInstance.setMinter(_newMinter);
     }
 
@@ -146,9 +172,9 @@ function stakeTokensFor(
     require(
         _duration == 1 minutes ||
         _duration == 90 days ||
-            _duration == 180 days ||
-            _duration == 270 days ||
-            _duration == 365 days,
+        _duration == 180 days ||
+        _duration == 270 days ||
+        _duration == 365 days,
         "Invalid duration"
     );
     // Check if beneficiary is already a stakeholder, if not, set to true
@@ -156,16 +182,31 @@ function stakeTokensFor(
         isStakeholder[beneficiary] = true;
     }
 
-    stakedAmount[beneficiary] += _amount;
+    // Calculate the multiplier based on the staking duration
+    uint256 multiplier = getMultiplier(_duration);
+
+    // Multiply the GLXR stake amount by the multiplier
+    uint256 glxrAmount = _amount.mul(multiplier);
+
+    stakedAmount[beneficiary] += glxrAmount;
     stakedDuration[beneficiary] = _duration;
     stakedTimestamp[beneficiary] = block.timestamp;
-    totalStakedAmount += _amount;
+    totalStakedAmount += glxrAmount;
 
+    // Mint Nebula Notes equal to the GLXR stake amount
     nebulaNoteInstance.mintTo(beneficiary, _amount);
 
-    emit TokensStaked(beneficiary, _amount, _duration);
-}
+    // Increase the mintId
+    currentMintId += 1;
+    
+    // Set equivalent staked GLXR amount for the minted Nebula Note with the mintId
+    mintIdToGLXR[currentMintId] = glxrAmount;
+    
+    // Update the last mintId for the beneficiary
+    lastMintId[beneficiary] = currentMintId;
 
+    emit TokensStaked(beneficiary, glxrAmount, _duration);
+}
 
 function stakeTokens(uint256 amount, uint256 duration) external validDuration(duration) whenNotPaused nonReentrant {
     require(amount > 0, "Amount must be greater than zero");
@@ -187,15 +228,23 @@ function stakeTokens(uint256 amount, uint256 duration) external validDuration(du
     stakedAmount[_msgSender()] = stakedAmount[_msgSender()].add(glxrAmount);
     totalStakedAmount = totalStakedAmount.add(glxrAmount);
 
-    // Set the Nebula Notes amount equal to the GLXR stake amount
-    uint256 nebulaeAmount = glxrAmount;
-    stakedAmountOfNebulae[_msgSender()] = stakedAmountOfNebulae[_msgSender()].add(nebulaeAmount);
-
     token.safeTransferFrom(_msgSender(), address(this), amount);
-    nebulaNoteInstance.mintTo(_msgSender(), nebulaeAmount);
+
+    // Mint Nebula Notes equal to the GLXR stake amount
+    nebulaNoteInstance.mintTo(_msgSender(), amount);
+
+    // Increase the mintId
+    currentMintId += 1;
+
+    // Set equivalent staked GLXR amount for the minted Nebula Note with the mintId
+    mintIdToGLXR[currentMintId] = glxrAmount;
+    
+    // Update the last mintId for the sender
+    lastMintId[_msgSender()] = currentMintId;
 
     emit TokensStaked(_msgSender(), glxrAmount, duration);
 }
+
 
 function unstakeTokens() external whenNotPaused nonReentrant {
     require(isStakeholder[_msgSender()] == true, "You do not have any staked tokens");
@@ -290,6 +339,19 @@ function unstakeTokens() external whenNotPaused nonReentrant {
             revert("Invalid staking duration");
         }
     }
+
+    function transferStakingRights(address from, address to, uint256 amount) external {
+    require(msg.sender == address(nebulaNoteInstance), "Only NebulaNote can initiate transfer");
+    
+    uint256 glxrAmount = nebulaNoteToGLXR[amount];
+    
+    // Reduce the GLXR stake amount from the sender
+    stakedAmount[from] = stakedAmount[from].sub(glxrAmount);
+
+    // Increase the GLXR stake amount for the recipient
+    stakedAmount[to] = stakedAmount[to].add(glxrAmount);
+}
+
 
     function setPenaltyAddress(address _penaltyAddress) external onlyOwner {
         penaltyAddress = _penaltyAddress;
