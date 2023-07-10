@@ -13,3 +13,19 @@ npx hardhat node
 node scripts/sample-script.js
 npx hardhat help
 ```
+# Deployment : 
+Deploy 
+Galaxer.sol
+CosmicCrucible.sol
+On deployment :
+Set Galaxer contract address
+Set penalty address
+Set staker role
+Portal.sol
+On deployment 
+Set  Galaxer address
+Set CoscmicCeucible address
+In this order
+Then 
+Set Portal address as Staker_Role in CosmicCrucible.sol
+And Set Portal address as MINTER_ROLE in Galaxer.sol
